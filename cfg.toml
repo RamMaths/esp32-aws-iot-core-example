@@ -1,5 +1,7 @@
 [ultrasonic]
-wifi_ssid = "Totalplay-93A2"
-wifi_pass = "93A2BCE4rQ6pq32j"
-base_url = "https://gb5d3dcd8bc55d2-prueba.adb.us-ashburn-1.oraclecloudapps.com/ords/prueba/BASUREROS/actualizarBasurero"
-container_id = "1"
+wifi_ssid = "HOME-80DC"
+wifi_pass = "C3B2D5C3C59C4DC7"
+mqtt_url = "mqtts://ayddrvc3hvejc-ats.iot.us-east-1.amazonaws.com"
+mqtt_client_id = "ESP32S3_ULTRASONIC"
+mqtt_topic_pub = "esp32/pub"
+mqtt_topic_sub = "esp32/sub"

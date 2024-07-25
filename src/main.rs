@@ -1,14 +1,16 @@
+use std::time::Duration;
+
 use crossbeam_channel::bounded;
 use esp_idf_hal::cpu::Core;
+use esp_idf_hal::sys::EspError;
 use esp_idf_hal::task::watchdog::{TWDTConfig, TWDTDriver};
 use esp_idf_hal::{
     gpio::{OutputPin, PinDriver},
     peripherals::Peripherals,
 };
+use esp_idf_svc::mqtt::client::QoS;
+use log::*;
 use ultrasonic::startup::App;
-use ultrasonic::{threads, ultrasonic::Ultrasonic};
-
-static ULTRASONIC_STACK_SIZE: usize = 2000;
 
 fn main() -> anyhow::Result<()> {
     // It is necessary to call this function once. Otherwise some patches to the runtime
@@ -19,58 +21,84 @@ fn main() -> anyhow::Result<()> {
     esp_idf_svc::log::EspLogger::initialize_default();
 
     // This sets the wifi and creates an http client
-    let mut app = App::spawn()?;
-
-    //ultrasonic sensor
-    let ultrasonic = Ultrasonic::new()?;
-
-    //reset button
+    let app = App::spawn()?;
     let peripherals = Peripherals::take().unwrap();
 
-    // Configure the watchdog timer
-    let config = TWDTConfig {
-        duration: std::time::Duration::from_secs(10),
-        panic_on_trigger: false, // this tells the esp not to Panic if the watchdog triggers
-        subscribed_idle_tasks: enumset::enum_set!(Core::Core1), // Subscribe to idle tasks on Core1 (core reading the ultarsonic sensor)
-    };
+    let mut led = PinDriver::output(peripherals.pins.gpio5.downgrade_output())?;
 
-    // Create the TWDT driver
-    let mut driver = TWDTDriver::new(peripherals.twdt, &config)?;
-
-    //application hardware
-    let button = PinDriver::input(peripherals.pins.gpio15)?;
-    let mut led = PinDriver::output(peripherals.pins.gpio7.downgrade_output())?;
-
-    let (tx, rx) = bounded::<f32>(1);
+    let (tx_mqtt, rx_mqtt) = bounded::<String>(1);
 
     let _ultrasonic_thread = std::thread::Builder::new()
-        .stack_size(ULTRASONIC_STACK_SIZE)
-        .spawn(move || threads::ultrasonic_thread_function(&mut driver, ultrasonic, tx))?;
-
-    let mut distance = -1.0;
-    let mut ready = false;
-    let mut already_sent = false;
-
-    loop {
-        match rx.try_recv() {
-            Ok(x) => {
-                distance = x;
-                ready = true;
-                println!("distance: {}", distance);
+        .stack_size(2000)
+        .spawn(move || loop {
+            match rx_mqtt.try_recv() {
+                Ok(kind) => {}
+                Err(_) => {}
             }
-            Err(_) => {}
-        }
+        })?;
 
-        if ready && distance <= 5.0 && !already_sent && distance > 0.0 {
-            //envío petición LLENO
-            app.client.process_request(1, &mut led)?;
-            already_sent = true;
-        }
+    run_mqtt(app)?;
+    Ok(())
+}
 
-        if ready && distance > 10.0 && already_sent && button.is_low() {
-            //envío petición VACIO
-            app.client.process_request(0, &mut led)?;
-            already_sent = false;
+fn run_mqtt(mut app: App) -> Result<(), EspError> {
+    let pub_topic = &app.client.pub_topic;
+    let sub_topic = &app.client.sub_topic;
+    std::thread::scope(|s| {
+        info!("About to start the MQTT client");
+
+        // Need to immediately start pumping the connection for messages, or else subscribe() and publish() below will not work
+        // Note that when using the alternative constructor - `EspMqttClient::new_cb` - you don't need to
+        // spawn a new thread, as the messages will be pumped with a backpressure into the callback you provide.
+        // Yet, you still need to efficiently process each message in the callback without blocking for too long.
+        //
+        // Note also that if you go to http://tools.emqx.io/ and then connect and send a message to topic
+        // "esp-mqtt-demo", the client configured here should receive it.
+        std::thread::Builder::new()
+            .stack_size(6000)
+            .spawn_scoped(s, move || {
+                info!("MQTT Listening for messages");
+
+                while let Ok(event) = app.client.mqtt_connection.next() {
+                    info!("[Queue] Event: {}", event.payload());
+                }
+
+                info!("Connection closed");
+            })
+            .unwrap();
+
+        loop {
+            if let Err(e) = app.client.mqtt_client.subscribe(sub_topic, QoS::AtMostOnce) {
+                error!("Failed to subscribe to topic \"{sub_topic}\": {e}, retrying...");
+
+                // Re-try in 0.5s
+                std::thread::sleep(Duration::from_millis(500));
+
+                continue;
+            }
+
+            info!("Subscribed to topic \"{sub_topic}\"");
+
+            // Just to give a chance of our connection to get even the first published message
+            std::thread::sleep(Duration::from_millis(500));
+
+            let payload = "Hello from esp-mqtt-demo!";
+
+            loop {
+                // app.client.mqtt_client.enqueue(
+                //     pub_topic,
+                //     QoS::AtMostOnce,
+                //     false,
+                //     payload.as_bytes(),
+                // )?;
+
+                // info!("Published \"{payload}\" to topic \"{pub_topic}\"");
+
+                let sleep_secs = 2;
+                //
+                // info!("Now sleeping for {sleep_secs}s...");
+                std::thread::sleep(Duration::from_secs(sleep_secs));
+            }
         }
-    }
+    })
 }

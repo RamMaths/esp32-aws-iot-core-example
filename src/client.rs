@@ -1,88 +1,69 @@
-use embedded_svc::io::Write;
-use serde_json::json;
-use esp_idf_svc::http::{
-    client::EspHttpConnection,
-    client::Configuration
+use esp_idf_svc::{
+    mqtt::client::{EspMqttClient, EspMqttConnection, MqttClientConfiguration},
+    tls::X509,
 };
-use embedded_svc::http::client::Client as HttpClient;
-use esp_idf_hal::gpio::{PinDriver, AnyOutputPin, Output};
-// use embedded_svc::http::client::Response;
+use std::time::Duration;
+use std::{mem, slice};
 
 pub struct Client {
-    http_client: HttpClient<EspHttpConnection>,
-    base_url: String,
-    container_id: String
+    pub mqtt_client: EspMqttClient<'static>,
+    pub mqtt_connection: EspMqttConnection,
+    pub pub_topic: String,
+    pub sub_topic: String,
 }
 
 impl Client {
     pub fn new(
-        base_url: String,
-        container_id: String
+        url: &str,
+        client_id: &str,
+        pub_topic: &str,
+        sub_topic: &str,
     ) -> anyhow::Result<Client> {
-        let connection = EspHttpConnection::new(&Configuration {
-            use_global_ca_store: true,
-            crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
+        let server_cert_bytes: Vec<u8> =
+            include_bytes!("../certificates/AmazonRootCA1.pem").to_vec();
+        let client_cert_bytes: Vec<u8> =
+            include_bytes!("../certificates/Device-certificate.pem.crt").to_vec();
+        let private_key_bytes: Vec<u8> =
+            include_bytes!("../certificates/private-key-private.pem.key").to_vec();
+
+        let server_cert: X509 = convert_certificate(server_cert_bytes);
+        let client_cert: X509 = convert_certificate(client_cert_bytes);
+        let private_key: X509 = convert_certificate(private_key_bytes);
+
+        let mqtt_client_config = MqttClientConfiguration {
+            client_id: Some(client_id),
+            crt_bundle_attach: Some(esp_idf_svc::hal::sys::esp_crt_bundle_attach),
+            keep_alive_interval: Some(Duration::from_secs(60)),
+            server_certificate: Some(server_cert),
+            client_certificate: Some(client_cert),
+            private_key: Some(private_key),
             ..Default::default()
-        })?;
+        };
 
-        let http_client = HttpClient::wrap(connection);
-        
-        Ok (
-            Client { 
-                http_client,
-                base_url,
-                container_id
-            }
-        )
+        let (mqtt_client, mqtt_connection) = EspMqttClient::new(url, &mqtt_client_config)?;
+
+        Ok(Self {
+            mqtt_client,
+            mqtt_connection,
+            pub_topic: pub_topic.to_string(),
+            sub_topic: sub_topic.to_string(),
+        })
     }
+}
 
-    pub fn process_request(
-        &mut self,
-        state: u8,
-        led: &mut PinDriver<AnyOutputPin, Output>
-    ) -> anyhow::Result<()> {
+fn convert_certificate(mut certificate_bytes: Vec<u8>) -> X509<'static> {
+    // append NUL
+    certificate_bytes.push(0);
 
-        led.set_high()?;
-        self.send_data(state)?;
-        led.set_low()?;
+    // convert the certificate
+    let certificate_slice: &[u8] = unsafe {
+        let ptr: *const u8 = certificate_bytes.as_ptr();
+        let len: usize = certificate_bytes.len();
+        mem::forget(certificate_bytes);
 
-        Ok(())
-    }
+        slice::from_raw_parts(ptr, len)
+    };
 
-    fn send_data(
-        &mut self,
-        state: u8
-    ) -> anyhow::Result<()> {
-        // Define the JSON body
-        let state = &format!("{}", state);
-        println!("state: {}, container: {}", &state, &self.container_id);
-        let body = json!({
-            "lleno": &state,
-            "id_": &self.container_id
-        });
-        let binding = body.to_string();
-
-        let content_length_header = format!("{}", binding.len());
-
-        let headers = [
-            ("content-type", "application/json"),
-            ("content-length", &*content_length_header)
-        ];
-
-        let mut request = self
-            .http_client
-            .post(
-                &self.base_url,
-                &headers
-            )?;
-
-        request.write_all(binding.as_bytes())?;
-        request.flush()?;
-
-        let response = request.submit()?;
-
-        println!("{}", response.status());
-
-        Ok(())
-    }
+    // return the certificate file in the correct format
+    X509::pem_until_nul(certificate_slice)
 }

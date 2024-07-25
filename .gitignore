@@ -1,5 +1,6 @@
 /.vscode
 /.embuild
 /target
+/certificates
 /Cargo.lock
 .DS_Store
