@@ -1,6 +1,6 @@
 [ultrasonic]
-wifi_ssid = "HOME-80DC"
-wifi_pass = "C3B2D5C3C59C4DC7"
+wifi_ssid = "INFINITUM3142"
+wifi_pass = "huntbzm4c4"
 mqtt_url = "mqtts://ayddrvc3hvejc-ats.iot.us-east-1.amazonaws.com"
 mqtt_client_id = "ESP32S3_ULTRASONIC"
 mqtt_topic_pub = "esp32/pub"

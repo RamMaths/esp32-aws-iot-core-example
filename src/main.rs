@@ -1,15 +1,15 @@
-use std::time::Duration;
-
+use anyhow::Context;
 use crossbeam_channel::bounded;
-use esp_idf_hal::cpu::Core;
+use embedded_svc::mqtt::client::EventPayload::Received;
 use esp_idf_hal::sys::EspError;
-use esp_idf_hal::task::watchdog::{TWDTConfig, TWDTDriver};
 use esp_idf_hal::{
     gpio::{OutputPin, PinDriver},
     peripherals::Peripherals,
 };
-use esp_idf_svc::mqtt::client::QoS;
+use esp_idf_svc::mqtt::client::{Event, QoS};
 use log::*;
+use serde::Deserialize;
+use std::time::Duration;
 use ultrasonic::startup::App;
 
 fn main() -> anyhow::Result<()> {
@@ -32,17 +32,29 @@ fn main() -> anyhow::Result<()> {
         .stack_size(2000)
         .spawn(move || loop {
             match rx_mqtt.try_recv() {
-                Ok(kind) => {}
+                Ok(action) => match action.as_str() {
+                    "on" => {
+                        led.set_high().unwrap();
+                    }
+                    _ => {}
+                },
                 Err(_) => {}
             }
+
+            std::thread::sleep(Duration::from_millis(500));
         })?;
 
-    run_mqtt(app)?;
+    run_mqtt(app, tx_mqtt)?;
     Ok(())
 }
 
-fn run_mqtt(mut app: App) -> Result<(), EspError> {
-    let pub_topic = &app.client.pub_topic;
+#[derive(Deserialize)]
+struct MqttMessage {
+    action: String,
+}
+
+fn run_mqtt(mut app: App, tx: crossbeam_channel::Sender<String>) -> Result<(), EspError> {
+    let _pub_topic = &app.client.pub_topic;
     let sub_topic = &app.client.sub_topic;
     std::thread::scope(|s| {
         info!("About to start the MQTT client");
@@ -61,6 +73,26 @@ fn run_mqtt(mut app: App) -> Result<(), EspError> {
 
                 while let Ok(event) = app.client.mqtt_connection.next() {
                     info!("[Queue] Event: {}", event.payload());
+
+                    if let Received {
+                        id: _,
+                        topic: _,
+                        data,
+                        details: _,
+                    } = event.payload()
+                    {
+                        match serde_json::from_slice::<MqttMessage>(data) {
+                            Ok(data) => {
+                                info!("[action]: {}", data.action);
+                                tx.send(data.action)
+                                    .expect("Could not send data among threads.");
+                            }
+                            Err(err) => error!(
+                                "Failed to parse the data from mqtt message due to {}.",
+                                err.to_string()
+                            ),
+                        }
+                    };
                 }
 
                 info!("Connection closed");
